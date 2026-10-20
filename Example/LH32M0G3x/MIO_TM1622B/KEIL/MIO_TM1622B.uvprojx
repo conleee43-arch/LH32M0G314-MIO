@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define></Define>
               <Undefine></Undefine>
-              <IncludePath>..\..\..\..\Device\LH32M0G3X;..\..\..\..\Drivers\CMSIS\Core\Include;..\..\..\..\Drivers\LHL\LH32M0G3x\inc;..\</IncludePath>
+              <IncludePath>..\..\..\..\Device\LH32M0G3X;..\..\..\..\Drivers\CMSIS\Core\Include;..\..\..\..\Drivers\LHL\LH32M0G3x\inc;..\;..\hardware</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -397,12 +397,7 @@
             <File>
               <FileName>tm1622b_driver.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\tm1622b_driver.c</FilePath>
-            </File>
-            <File>
-              <FileName>tm1622b_driver.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\tm1622b_driver.h</FilePath>
+              <FilePath>..\hardware\tm1622b_driver.c</FilePath>
             </File>
           </Files>
         </Group>
