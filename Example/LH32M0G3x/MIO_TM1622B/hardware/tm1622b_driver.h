@@ -52,16 +52,10 @@ extern "C" {
 #define TM1622B_CMD_TIMER_EN    0x006   /* 0000-0011-0 打开定时器输出 */
 #define TM1622B_CMD_WDT_EN      0x007   /* 0000-0011-1 打开看门狗定时器 */
 #define TM1622B_CMD_TONE_OFF    0x008   /* 0000-0100-0 关闭声音输出 */
-#define TM1622B_CMD_TONE_ON     0x009   /* 0000-0101-0 打开声音输出 */
 
-/* 偏置与COM设置命令 */
-#define TM1622B_CMD_BIAS_1_2_2COM  0x020 /* 1/2 Bias, 2 COM */
-#define TM1622B_CMD_BIAS_1_2_3COM  0x024 /* 1/2 Bias, 3 COM */
-#define TM1622B_CMD_BIAS_1_2_4COM  0x028 /* 1/2 Bias, 4 COM */
-#define TM1622B_CMD_BIAS_1_3_2COM  0x021 /* 1/3 Bias, 2 COM */
-#define TM1622B_CMD_BIAS_1_3_3COM  0x025 /* 1/3 Bias, 3 COM */
-#define TM1622B_CMD_BIAS_1_3_4COM  0x029 /* 1/3 Bias, 4 COM */
-#define TM1622B_CMD_BIAS_1_4_8COM  0x02A /* 1/4 Bias, 8 COM (默认常用配置) */
+/* 注：TM1622B 硬件固定 1/4 偏压，COM 数量由接线决定（开显示后可驱动 2/4/8 COM），
+   数据手册命令表中不存在任何 BIAS/COM 配置命令，故不提供相关宏；
+   蜂鸣器亦无独立 "TONE ON" 命令（仅 TONE OFF），开启声音需用数据手册的 TONE 2K / TONE 4K 命令。 */
 
 /* ============================================================================
    API 函数声明

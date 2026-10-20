@@ -13,13 +13,29 @@
    内部宏定义与硬件寄存器快速操作
    ============================================================================ */
 
-/* MIO 时钟与波特率计算参数 (假设 MIO_CLK = 8MHz, PCLK2=32MHz, MIODIV=4)
-   TIMCMP[7:0] = (MIO_CLK / (2 * Baud)) - 1
-   WR  100kHz: (8000000 / 200000) - 1 = 39
-   RD  50kHz : (8000000 / 100000) - 1 = 79
-*/
-#define MIO_WR_BAUD_DIV         39U     /* WR 100kHz */
-#define MIO_RD_BAUD_DIV         79U     /* RD 50kHz  */
+/* MIO 时钟与波特率计算参数
+   - MIO_CLK = PCLK2（MIODIV 保持复位默认值 0，即不分频）
+   - TIMCMP[7:0] = (MIO_CLK / (2 * Baud)) - 1
+   - 目标: WR 100kHz、RD 50kHz（均低于 TM1622B 上限）
+   分频值在运行时依据实际 PCLK2 计算（见 tm1622b_update_baud_div）。
+   注意: TIMCMP[7:0] 仅 8 位，PCLK2 过高时按 0xFF 封顶——只会降速，不会超频。 */
+#define TM1622B_WR_BAUD_HZ      100000U /* WR 目标频率 */
+#define TM1622B_RD_BAUD_HZ      50000U  /* RD 目标频率 */
+
+static uint32_t s_mio_wr_baud_div = 39U; /* WR 分频，运行时更新 */
+static uint32_t s_mio_rd_baud_div = 79U; /* RD 分频，运行时更新 */
+
+/* 依据实际 MIO 时钟(=PCLK2)计算 WR/RD 的 TIMCMP 分频值 */
+static void tm1622b_update_baud_div(void)
+{
+    uint32_t mio_clk = LHL_RCC_GetPCLK2Freq(); /* MIO_CLK = PCLK2 */
+
+    s_mio_wr_baud_div = (mio_clk / (2U * TM1622B_WR_BAUD_HZ)) - 1U;
+    s_mio_rd_baud_div = (mio_clk / (2U * TM1622B_RD_BAUD_HZ)) - 1U;
+
+    if (s_mio_wr_baud_div > 0xFFU) { s_mio_wr_baud_div = 0xFFU; }
+    if (s_mio_rd_baud_div > 0xFFU) { s_mio_rd_baud_div = 0xFFU; }
+}
 
 /* 帧组合算法辅助宏 */
 /* 命令帧: 100(3位ID) + C8..C0(9位命令)，共12位 */
@@ -73,11 +89,10 @@ void TM1622B_Init(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    /* 1. 使能 MIO 外设（GPIO 时钟由 LHL_GPIO_Init 内部自动使能） */
+    /* 1. 使能 MIO 外设（GPIO 时钟由 LHL_GPIO_Init 内部自动使能），
+       并依实际 PCLK2 计算 WR/RD 分频（MIO_CLK = PCLK2，MIODIV 保持默认不分频） */
     LHL_MIO_Init();
-
-    /* 配置 MIO 时钟分频: PCLK2 / 4 (32MHz/4 = 8MHz) */
-    pRCC->CFGR = (pRCC->CFGR & ~RCC_CFGR_MIODIV_Msk) | (2U << RCC_CFGR_MIODIV_Pos);
+    tm1622b_update_baud_div();
 
     /* 2. 配置 CS 引脚 (P1.7) 为 GPIO 推挽输出，空闲拉高 */
     GPIO_InitStruct.Pin = TM1622B_CS_PIN;
@@ -192,7 +207,7 @@ void TM1622B_WriteCmd(uint16_t cmd9)
                        (1U << MIO_SHIFTCTL_TIMPOL_SHIFT);
 
     /* 设置 Timer 0 位数: 12位 (12 * 2 - 1 = 23) */
-    MIO->TIMCMP[0] = (23U << 8) | MIO_WR_BAUD_DIV;
+    MIO->TIMCMP[0] = (23U << 8) | s_mio_wr_baud_div;
 
     /* 写入 SHIFTBUF0 自动触发发送 */
     MIO->SHIFTBUF[0] = frame;
@@ -224,7 +239,7 @@ void TM1622B_WriteRAM(uint8_t addr, uint8_t data)
                        (1U << MIO_SHIFTCTL_TIMPOL_SHIFT);
 
     /* 设置 Timer 0 位数: 13位 (13 * 2 - 1 = 25) */
-    MIO->TIMCMP[0] = (25U << 8) | MIO_WR_BAUD_DIV;
+    MIO->TIMCMP[0] = (25U << 8) | s_mio_wr_baud_div;
 
     /* 写入 SHIFTBUF0 启动硬件发送 */
     MIO->SHIFTBUF[0] = frame;
@@ -272,7 +287,7 @@ void TM1622B_WriteRAM_Continuous(uint8_t start_addr, const uint8_t *pData, uint8
         }
 
         /* 配置位数并触发硬件发送 */
-        MIO->TIMCMP[0] = ((bits * 2 - 1) << 8) | MIO_WR_BAUD_DIV;
+        MIO->TIMCMP[0] = ((bits * 2 - 1) << 8) | s_mio_wr_baud_div;
         MIO->SHIFTBUF[0] = frame;
 
         while (!(MIO->SHIFTSTAT & (1U << 0)))
@@ -306,7 +321,7 @@ uint8_t TM1622B_ReadRAM(uint8_t addr)
                        (3U << MIO_SHIFTCTL_PINCFG_SHIFT) |
                        (1U << MIO_SHIFTCTL_TIMPOL_SHIFT);
 
-    MIO->TIMCMP[0] = (17U << 8) | MIO_WR_BAUD_DIV; /* 9位: 9*2-1=17 */
+    MIO->TIMCMP[0] = (17U << 8) | s_mio_wr_baud_div; /* 9位: 9*2-1=17 */
     MIO->SHIFTBUF[0] = req_frame;
 
     while (!(MIO->SHIFTSTAT & (1U << 0)))
@@ -318,7 +333,7 @@ uint8_t TM1622B_ReadRAM(uint8_t addr)
                        (0U << MIO_SHIFTCTL_PINCFG_SHIFT);
 
     /* 3. 产生 RD 读时钟并接收 5 位 (1位装载脉冲 + 4位数据) */
-    MIO->TIMCMP[1] = (9U << 8) | MIO_RD_BAUD_DIV; /* 5位: 5*2-1=9 */
+    MIO->TIMCMP[1] = (9U << 8) | s_mio_rd_baud_div; /* 5位: 5*2-1=9 */
     MIO->SHIFTBUF[1] = 0x00000000U;               /* 触发 Timer1 */
 
     while (!(MIO->SHIFTSTAT & (1U << 1)))
@@ -360,7 +375,7 @@ void TM1622B_ReadRAM_Continuous(uint8_t start_addr, uint8_t *pData, uint8_t coun
                        (3U << MIO_SHIFTCTL_PINCFG_SHIFT) |
                        (1U << MIO_SHIFTCTL_TIMPOL_SHIFT);
 
-    MIO->TIMCMP[0] = (17U << 8) | MIO_WR_BAUD_DIV;
+    MIO->TIMCMP[0] = (17U << 8) | s_mio_wr_baud_div;
     MIO->SHIFTBUF[0] = req_frame;
 
     while (!(MIO->SHIFTSTAT & (1U << 0)))
@@ -379,7 +394,7 @@ void TM1622B_ReadRAM_Continuous(uint8_t start_addr, uint8_t *pData, uint8_t coun
         if (i == 0)
         {
             /* 首个 nibble 包含 1 位首脉冲装载: 5 位 (TIMCMP = 9) */
-            MIO->TIMCMP[1] = (9U << 8) | MIO_RD_BAUD_DIV;
+            MIO->TIMCMP[1] = (9U << 8) | s_mio_rd_baud_div;
             MIO->SHIFTBUF[1] = 0x00000000U;
 
             while (!(MIO->SHIFTSTAT & (1U << 1)))
@@ -392,7 +407,7 @@ void TM1622B_ReadRAM_Continuous(uint8_t start_addr, uint8_t *pData, uint8_t coun
         else
         {
             /* 续读 nibble: 直接读 4 位 (TIMCMP = 7) */
-            MIO->TIMCMP[1] = (7U << 8) | MIO_RD_BAUD_DIV;
+            MIO->TIMCMP[1] = (7U << 8) | s_mio_rd_baud_div;
             MIO->SHIFTBUF[1] = 0x00000000U;
 
             while (!(MIO->SHIFTSTAT & (1U << 1)))
@@ -442,8 +457,8 @@ void TM1622B_Fill(uint8_t pattern)
  */
 void TM1622B_DisplayOn(void)
 {
+    /* TM1622B 固定 1/4 偏压、COM 数量由接线决定，不存在 BIAS/COM 配置命令 */
     TM1622B_WriteCmd(TM1622B_CMD_SYS_EN);
-    TM1622B_WriteCmd(TM1622B_CMD_BIAS_1_4_8COM);
     TM1622B_WriteCmd(TM1622B_CMD_LCD_ON);
 }
 
