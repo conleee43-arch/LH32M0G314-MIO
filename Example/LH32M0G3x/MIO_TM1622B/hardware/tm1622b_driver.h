@@ -41,17 +41,21 @@ extern "C" {
 #define TM1622B_CS_HIGH()       LHL_GPIO_SetPins(TM1622B_CS_PORT, TM1622B_CS_PIN)
 
 /* ============================================================================
-   TM1622B 命令字宏定义 (100 + 9位命令)
+   TM1622B 命令字宏定义 (ID=100 + 9位命令字 C8..C0)
+   注意：有效操作码是高 8 位 C8..C1，最低位 C0 是无关位 X（手册建议写 0），
+         故命令字 = 操作码 << 1。例如 SYS EN 操作码 0x01 -> 命令字 0x002。
+         (旧定义把操作码直接当命令字、少移 1 位，会使 SYS EN 发成 SYS DIS、
+          LCD ON 发成 SYS EN，真 LCD ON 永不发出。)
    ============================================================================ */
-#define TM1622B_CMD_SYS_DIS     0x000   /* 0000-0000-0 系统振荡器关闭，LCD偏置发生器关闭 */
-#define TM1622B_CMD_SYS_EN      0x001   /* 0000-0000-1 打开系统振荡器 */
-#define TM1622B_CMD_LCD_OFF     0x002   /* 0000-0001-0 关闭LCD偏置发生器 */
-#define TM1622B_CMD_LCD_ON      0x003   /* 0000-0001-1 打开LCD偏置发生器 */
-#define TM1622B_CMD_TIMER_DIS   0x004   /* 0000-0010-0 关闭定时器输出 */
-#define TM1622B_CMD_WDT_DIS     0x005   /* 0000-0010-1 关闭看门狗定时器 */
-#define TM1622B_CMD_TIMER_EN    0x006   /* 0000-0011-0 打开定时器输出 */
-#define TM1622B_CMD_WDT_EN      0x007   /* 0000-0011-1 打开看门狗定时器 */
-#define TM1622B_CMD_TONE_OFF    0x008   /* 0000-0100-0 关闭声音输出 */
+#define TM1622B_CMD_SYS_DIS     0x000   /* 0000_0000_X 系统振荡器关闭，LCD偏置发生器关闭 */
+#define TM1622B_CMD_SYS_EN      0x002   /* 0000_0001_X 打开系统振荡器 */
+#define TM1622B_CMD_LCD_OFF     0x004   /* 0000_0010_X 关闭LCD偏置发生器 */
+#define TM1622B_CMD_LCD_ON      0x006   /* 0000_0011_X 打开LCD偏置发生器 */
+#define TM1622B_CMD_TIMER_DIS   0x008   /* 0000_0100_X 关闭定时器输出 */
+#define TM1622B_CMD_WDT_DIS     0x00A   /* 0000_0101_X 关闭看门狗定时器 */
+#define TM1622B_CMD_TIMER_EN    0x00C   /* 0000_0110_X 打开定时器输出 */
+#define TM1622B_CMD_WDT_EN      0x00E   /* 0000_0111_X 打开看门狗定时器 */
+#define TM1622B_CMD_TONE_OFF    0x010   /* 0000_1000_X 关闭声音输出 */
 
 /* 注：TM1622B 硬件固定 1/4 偏压，COM 数量由接线决定（开显示后可驱动 2/4/8 COM），
    数据手册命令表中不存在任何 BIAS/COM 配置命令，故不提供相关宏；

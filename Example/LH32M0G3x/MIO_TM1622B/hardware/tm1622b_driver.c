@@ -54,7 +54,7 @@ static inline uint32_t tm1622b_rev_bits(uint32_t v, uint32_t n)
     return r;
 }
 
-/* 命令帧: 线上序 100 + C8..C0(MSB先)，共12位。例: SYS EN(0x001) -> 0x801 */
+/* 命令帧: 线上序 100 + C8..C0(MSB先)，共12位。例: SYS EN(命令字0x002) -> 帧0x401 */
 static inline uint32_t tm1622b_frame_cmd(uint16_t cmd9)
 {
     return ((tm1622b_rev_bits((uint32_t)(cmd9 & 0x01FF), 9U) << 3) | 0x01U); /* ID 线上序 1,0,0 */
@@ -350,9 +350,6 @@ void TM1622B_WriteRAM_Continuous(uint8_t start_addr, const uint8_t *pData, uint8
     }
     remaining = count;
 
-    TM1622B_CS_LOW();
-    tm1622b_delay_us(1);
-
     /* 确保 Shifter 0 处于 TX 输出模式 */
     MIO->SHIFTCTL[0] = (2U << MIO_SHIFTCTL_SMOD_SHIFT)   |
                        (0U << MIO_SHIFTCTL_TIMSEL_SHIFT) |
@@ -360,36 +357,45 @@ void TM1622B_WriteRAM_Continuous(uint8_t start_addr, const uint8_t *pData, uint8
                        (3U << MIO_SHIFTCTL_PINCFG_SHIFT) |
                        (1U << MIO_SHIFTCTL_TIMPOL_SHIFT);
 
-    /* 分帧发送 (每帧最多 5 个 nibble，避免超过 32位 缓冲区) */
+    /* 分包发送：每包是一个独立 CS 事务（帧头 101+地址 + 最多 5 个 nibble，
+       受 32 位 SHIFTBUF 限制）。不能在 CS 全程不抬的情况下逐包重发帧头：
+       芯片在一次 CS 会话中只认首个帧头，其后位流全按数据 nibble 吞入
+       （地址自增），重发的 9 位帧头会被当成数据，造成地址/数据错位。 */
     while (remaining > 0)
     {
         uint8_t chunk = (remaining > 5) ? 5 : remaining;
         uint32_t frame = 0x05U | (tm1622b_rev_bits((uint32_t)(curr_addr & 0x3F), 6U) << 3); /* 101 + Addr(MSB先) */
         uint8_t bits = 9 + chunk * 4;
+        uint8_t ok;
 
         for (uint8_t i = 0; i < chunk; i++)
         {
             frame |= ((uint32_t)(pData[idx + i] & 0x0F) << (9 + i * 4));
         }
 
-        /* 配置位数并触发硬件发送 */
+        /* 本包独立事务：拉低 CS -> 发送 -> 拉高 CS */
+        TM1622B_CS_LOW();
+        tm1622b_delay_us(1);
+
         MIO->TIMCMP[0] = ((bits * 2 - 1) << 8) | s_mio_wr_baud_div;
         MIO->TIMSTAT = (1U << 0); /* 清残留 TSF0 */
         MIO->SHIFTBUF[0] = frame;
 
-        /* 等待本帧结束 (TSF0) */
-        if (!tm1622b_wait_tsf(0U))
+        ok = tm1622b_wait_tsf(0U); /* 等待本包发送结束 (TSF0) */
+
+        tm1622b_delay_us(1);
+        TM1622B_CS_HIGH();
+        tm1622b_delay_us(1); /* CS 高电平间隔 >= 500ns */
+
+        if (!ok)
         {
-            break;
+            return;
         }
 
         idx += chunk;
         curr_addr += chunk;
         remaining -= chunk;
     }
-
-    tm1622b_delay_us(1);
-    TM1622B_CS_HIGH();
 }
 
 /**
