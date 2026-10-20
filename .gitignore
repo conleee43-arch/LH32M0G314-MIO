@@ -1,0 +1,20 @@
+# Keil MDK / ARM 编译产物
+Objects/
+Listings/
+*.uvguix.*
+
+# 常见中间文件
+*.o
+*.obj
+*.crf
+*.axf
+*.lnp
+*.sct
+*.dep
+*.map
+*.lst
+
+# CMSIS 中未被工程引用的部分（体积大：Lib 约33MB、DSP 约21MB、NN 约1.2MB）
+Drivers/CMSIS/Lib/
+Drivers/CMSIS/DSP/
+Drivers/CMSIS/NN/
