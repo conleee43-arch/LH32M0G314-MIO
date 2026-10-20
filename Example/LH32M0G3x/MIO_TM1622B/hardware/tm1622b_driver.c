@@ -78,6 +78,61 @@ static void tm1622b_delay_us(uint32_t us)
     }
 }
 
+/* busy-wait 界限：防止时钟配置错误时死等导致整机挂死 */
+#define TM1622B_WAIT_TIMEOUT    0x00100000U
+
+/* 等待 SSF：1=缓冲区就绪（发送=缓冲已空可写下帧；接收=数据已就绪可读）。超时返回 0 */
+static uint8_t tm1622b_wait_ssf(uint32_t shifter)
+{
+    uint32_t timeout = TM1622B_WAIT_TIMEOUT;
+
+    while (!(MIO->SHIFTSTAT & (1U << shifter)))
+    {
+        if (timeout-- == 0U) { return 0U; }
+    }
+    return 1U;
+}
+
+/* 等待 TSF：1=定时器边沿计满（真帧结束，SSF 只代表缓冲区空）。写 1 清除后返回 1；超时返回 0 */
+static uint8_t tm1622b_wait_tsf(uint32_t timer)
+{
+    uint32_t timeout = TM1622B_WAIT_TIMEOUT;
+
+    while (!(MIO->TIMSTAT & (1U << timer)))
+    {
+        if (timeout-- == 0U) { return 0U; }
+    }
+    MIO->TIMSTAT = (1U << timer); /* 写 1 清除状态标志 */
+    return 1U;
+}
+
+/* 读阶段把 DATA 脚(P1.4) 切为输入，避免与 TM1622B 的 DATA 输出对顶 */
+static void tm1622b_data_pin_input(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    gpio.Pin = TM1622B_DATA_PIN;
+    gpio.Mode = GPIO_MODE_INPUT;
+    gpio.Pull = GPIO_NOPULL;
+    gpio.SchmittTrigger = ENABLE;
+    gpio.Alternate = GPIO1_4_AF_MIO_D0; /* 保持 MIO 复用，仅切方向 */
+    LHL_GPIO_Init(TM1622B_DATA_PORT, &gpio);
+}
+
+/* 读结束后恢复 DATA 脚为 MIO 推挽输出 */
+static void tm1622b_data_pin_output(void)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    gpio.Pin = TM1622B_DATA_PIN;
+    gpio.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio.Current = GPIO_CURRENT_8mA;
+    gpio.Pull = GPIO_PULLUP;
+    gpio.SchmittTrigger = DISABLE;
+    gpio.Alternate = GPIO1_4_AF_MIO_D0;
+    LHL_GPIO_Init(TM1622B_DATA_PORT, &gpio);
+}
+
 /* ============================================================================
    驱动核心API实现
    ============================================================================ */
@@ -209,12 +264,15 @@ void TM1622B_WriteCmd(uint16_t cmd9)
     /* 设置 Timer 0 位数: 12位 (12 * 2 - 1 = 23) */
     MIO->TIMCMP[0] = (23U << 8) | s_mio_wr_baud_div;
 
-    /* 写入 SHIFTBUF0 自动触发发送 */
+    /* 清残留 TSF0，再写入 SHIFTBUF0 触发发送 */
+    MIO->TIMSTAT = (1U << 0);
     MIO->SHIFTBUF[0] = frame;
 
-    /* 等待发送完成 (SSF0 置位) */
-    while (!(MIO->SHIFTSTAT & (1U << 0)))
+    /* 等待真帧结束 (TSF0：定时器边沿计满，SSF 仅表示缓冲区空) */
+    if (!tm1622b_wait_tsf(0U))
     {
+        TM1622B_CS_HIGH();
+        return;
     }
 
     tm1622b_delay_us(1);
@@ -241,12 +299,15 @@ void TM1622B_WriteRAM(uint8_t addr, uint8_t data)
     /* 设置 Timer 0 位数: 13位 (13 * 2 - 1 = 25) */
     MIO->TIMCMP[0] = (25U << 8) | s_mio_wr_baud_div;
 
-    /* 写入 SHIFTBUF0 启动硬件发送 */
+    /* 清残留 TSF0，再写 SHIFTBUF0 启动发送 */
+    MIO->TIMSTAT = (1U << 0);
     MIO->SHIFTBUF[0] = frame;
 
-    /* 等待发送完成 */
-    while (!(MIO->SHIFTSTAT & (1U << 0)))
+    /* 等待真帧结束 (TSF0) */
+    if (!tm1622b_wait_tsf(0U))
     {
+        TM1622B_CS_HIGH();
+        return;
     }
 
     tm1622b_delay_us(1);
@@ -263,6 +324,14 @@ void TM1622B_WriteRAM_Continuous(uint8_t start_addr, const uint8_t *pData, uint8
     uint8_t idx = 0;
 
     if (pData == NULL || count == 0) return;
+
+    /* 地址空间仅 64 个 nibble：越界即截断，避免地址 &0x3F 静默回卷覆盖 */
+    if (start_addr >= 64U) return;
+    if (((uint16_t)start_addr + (uint16_t)count) > 64U)
+    {
+        count = (uint8_t)(64U - (uint16_t)start_addr);
+    }
+    remaining = count;
 
     TM1622B_CS_LOW();
     tm1622b_delay_us(1);
@@ -288,10 +357,13 @@ void TM1622B_WriteRAM_Continuous(uint8_t start_addr, const uint8_t *pData, uint8
 
         /* 配置位数并触发硬件发送 */
         MIO->TIMCMP[0] = ((bits * 2 - 1) << 8) | s_mio_wr_baud_div;
+        MIO->TIMSTAT = (1U << 0); /* 清残留 TSF0 */
         MIO->SHIFTBUF[0] = frame;
 
-        while (!(MIO->SHIFTSTAT & (1U << 0)))
+        /* 等待本帧结束 (TSF0) */
+        if (!tm1622b_wait_tsf(0U))
         {
+            break;
         }
 
         idx += chunk;
@@ -322,33 +394,37 @@ uint8_t TM1622B_ReadRAM(uint8_t addr)
                        (1U << MIO_SHIFTCTL_TIMPOL_SHIFT);
 
     MIO->TIMCMP[0] = (17U << 8) | s_mio_wr_baud_div; /* 9位: 9*2-1=17 */
+    MIO->TIMSTAT = (1U << 0);                        /* 清残留 TSF0 */
     MIO->SHIFTBUF[0] = req_frame;
 
-    while (!(MIO->SHIFTSTAT & (1U << 0)))
+    /* 等待读请求帧结束 (TSF0) */
+    if (!tm1622b_wait_tsf(0U))
     {
+        TM1622B_CS_HIGH();
+        return 0U;
     }
 
-    /* 2. 释放 DATA 引脚 (将 MIO_D0 显式设为输入，避免驱动冲突) */
+    /* 2. 释放 MIO 输出，并把 DATA 脚切为输入，避免与 TM1622B 的 DATA 输出对顶 */
     MIO->SHIFTCTL[0] = (0U << MIO_SHIFTCTL_SMOD_SHIFT)   |
                        (0U << MIO_SHIFTCTL_PINCFG_SHIFT);
+    tm1622b_data_pin_input();
 
     /* 3. 产生 RD 读时钟并接收 5 位 (1位装载脉冲 + 4位数据) */
     MIO->TIMCMP[1] = (9U << 8) | s_mio_rd_baud_div; /* 5位: 5*2-1=9 */
     MIO->SHIFTBUF[1] = 0x00000000U;               /* 触发 Timer1 */
 
-    while (!(MIO->SHIFTSTAT & (1U << 1)))
-    {
-    }
+    (void)tm1622b_wait_ssf(1U); /* 等待接收完成 (SSF1=缓冲非空，接收模式语义) */
 
     /* 读取位反转寄存器，提取位 D0~D3 */
     raw_rd = MIO->SHIFTBUFBIS[1];
 
-    /* 4. 恢复 Shifter 0 的 TX 配置 */
+    /* 4. 恢复 Shifter 0 的 TX 配置与 DATA 脚方向 */
     MIO->SHIFTCTL[0] = (2U << MIO_SHIFTCTL_SMOD_SHIFT)   |
                        (0U << MIO_SHIFTCTL_TIMSEL_SHIFT) |
                        (0U << MIO_SHIFTCTL_PINSEL_SHIFT) |
                        (3U << MIO_SHIFTCTL_PINCFG_SHIFT) |
                        (1U << MIO_SHIFTCTL_TIMPOL_SHIFT);
+    tm1622b_data_pin_output();
 
     tm1622b_delay_us(1);
     TM1622B_CS_HIGH();
@@ -376,15 +452,20 @@ void TM1622B_ReadRAM_Continuous(uint8_t start_addr, uint8_t *pData, uint8_t coun
                        (1U << MIO_SHIFTCTL_TIMPOL_SHIFT);
 
     MIO->TIMCMP[0] = (17U << 8) | s_mio_wr_baud_div;
+    MIO->TIMSTAT = (1U << 0); /* 清残留 TSF0 */
     MIO->SHIFTBUF[0] = req_frame;
 
-    while (!(MIO->SHIFTSTAT & (1U << 0)))
+    /* 等待读请求帧结束 (TSF0) */
+    if (!tm1622b_wait_tsf(0U))
     {
+        TM1622B_CS_HIGH();
+        return;
     }
 
-    /* 2. 释放 DATA 引脚 */
+    /* 2. 释放 MIO 输出，并把 DATA 脚切为输入，避免读写对顶 */
     MIO->SHIFTCTL[0] = (0U << MIO_SHIFTCTL_SMOD_SHIFT)   |
                        (0U << MIO_SHIFTCTL_PINCFG_SHIFT);
+    tm1622b_data_pin_input();
 
     /* 3. 连续接收 */
     for (uint8_t i = 0; i < count; i++)
@@ -397,9 +478,7 @@ void TM1622B_ReadRAM_Continuous(uint8_t start_addr, uint8_t *pData, uint8_t coun
             MIO->TIMCMP[1] = (9U << 8) | s_mio_rd_baud_div;
             MIO->SHIFTBUF[1] = 0x00000000U;
 
-            while (!(MIO->SHIFTSTAT & (1U << 1)))
-            {
-            }
+            (void)tm1622b_wait_ssf(1U);
 
             raw_rd = MIO->SHIFTBUFBIS[1];
             pData[i] = tm1622b_parse_rd_first(raw_rd);
@@ -410,21 +489,20 @@ void TM1622B_ReadRAM_Continuous(uint8_t start_addr, uint8_t *pData, uint8_t coun
             MIO->TIMCMP[1] = (7U << 8) | s_mio_rd_baud_div;
             MIO->SHIFTBUF[1] = 0x00000000U;
 
-            while (!(MIO->SHIFTSTAT & (1U << 1)))
-            {
-            }
+            (void)tm1622b_wait_ssf(1U);
 
             raw_rd = MIO->SHIFTBUFBIS[1];
             pData[i] = tm1622b_parse_rd_next(raw_rd);
         }
     }
 
-    /* 4. 恢复 TX 配置 */
+    /* 4. 恢复 TX 配置与 DATA 脚方向 */
     MIO->SHIFTCTL[0] = (2U << MIO_SHIFTCTL_SMOD_SHIFT)   |
                        (0U << MIO_SHIFTCTL_TIMSEL_SHIFT) |
                        (0U << MIO_SHIFTCTL_PINSEL_SHIFT) |
                        (3U << MIO_SHIFTCTL_PINCFG_SHIFT) |
                        (1U << MIO_SHIFTCTL_TIMPOL_SHIFT);
+    tm1622b_data_pin_output();
 
     tm1622b_delay_us(1);
     TM1622B_CS_HIGH();
