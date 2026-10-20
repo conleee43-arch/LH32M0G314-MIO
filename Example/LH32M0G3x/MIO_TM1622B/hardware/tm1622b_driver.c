@@ -37,23 +37,40 @@ static void tm1622b_update_baud_div(void)
     if (s_mio_rd_baud_div > 0xFFU) { s_mio_rd_baud_div = 0xFFU; }
 }
 
-/* 帧组合算法辅助宏 */
-/* 命令帧: 100(3位ID) + C8..C0(9位命令)，共12位 */
+/* 帧打包说明（位序是关键）：
+   TM1622B 时序图（时间序）要求 ID、命令、地址均 MSB 先发（命令帧线上序
+   1,0,0,C8..C0；写帧 1,0,1,A5..A0,D0..D3；数据 D0..D3 为 LSB 先发），
+   而 MIO 写 SHIFTBUF 为 bit0 先出，故装帧时必须“第一个发的位放 bit0”，
+   ID/命令/地址位段需按位反转后填入；数据段本来就 LSB 先发，不用反转。 */
+/* 位段反转：将 v 的低 n 位按位序翻转 */
+static inline uint32_t tm1622b_rev_bits(uint32_t v, uint32_t n)
+{
+    uint32_t r = 0U;
+    while (n-- > 0U)
+    {
+        r = (r << 1) | (v & 1U);
+        v >>= 1;
+    }
+    return r;
+}
+
+/* 命令帧: 线上序 100 + C8..C0(MSB先)，共12位。例: SYS EN(0x001) -> 0x801 */
 static inline uint32_t tm1622b_frame_cmd(uint16_t cmd9)
 {
-    return (((uint32_t)(cmd9 & 0x01FF) << 3) | 0x04U); /* 0b100 = 0x04 */
+    return ((tm1622b_rev_bits((uint32_t)(cmd9 & 0x01FF), 9U) << 3) | 0x01U); /* ID 线上序 1,0,0 */
 }
 
-/* 写数据帧: 101(3位ID) + A5..A0(6位地址) + D0..D3(4位数据)，共13位 */
+/* 写数据帧: 线上序 101 + A5..A0(MSB先) + D0..D3(LSB先)，共13位 */
 static inline uint32_t tm1622b_frame_wr(uint8_t addr, uint8_t nibble)
 {
-    return (((uint32_t)(nibble & 0x0F) << 9) | ((uint32_t)(addr & 0x3F) << 3) | 0x05U); /* 0b101 = 0x05 */
+    return (((uint32_t)(nibble & 0x0F) << 9) |
+            (tm1622b_rev_bits((uint32_t)(addr & 0x3F), 6U) << 3) | 0x05U); /* ID 线上序 1,0,1 */
 }
 
-/* 读请求帧: 110(3位ID) + A5..A0(6位地址)，共9位 */
+/* 读请求帧: 线上序 110 + A5..A0(MSB先)，共9位 */
 static inline uint32_t tm1622b_frame_rd_req(uint8_t addr)
 {
-    return (((uint32_t)(addr & 0x3F) << 3) | 0x06U); /* 0b110 = 0x06 */
+    return ((tm1622b_rev_bits((uint32_t)(addr & 0x3F), 6U) << 3) | 0x03U); /* ID 线上序 1,1,0 */
 }
 
 /* 读数据解析: 取 bit[4:1] (丢弃首位装载脉冲) */
@@ -347,7 +364,7 @@ void TM1622B_WriteRAM_Continuous(uint8_t start_addr, const uint8_t *pData, uint8
     while (remaining > 0)
     {
         uint8_t chunk = (remaining > 5) ? 5 : remaining;
-        uint32_t frame = 0x05U | ((uint32_t)(curr_addr & 0x3F) << 3); /* 101 + Addr */
+        uint32_t frame = 0x05U | (tm1622b_rev_bits((uint32_t)(curr_addr & 0x3F), 6U) << 3); /* 101 + Addr(MSB先) */
         uint8_t bits = 9 + chunk * 4;
 
         for (uint8_t i = 0; i < chunk; i++)
